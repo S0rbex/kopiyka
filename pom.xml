@@ -28,5 +28,6 @@
          libs/platform-starter, services/merchant-service, services/payment-service,
          services/ledger-service, services/api-gateway -->
     <modules>
+        <module>services/merchant-service</module>
     </modules>
 </project>
