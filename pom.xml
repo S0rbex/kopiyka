@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Spring Boot parent: versions of all Spring/third-party libraries and sane plugin defaults -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.kopiyka</groupId>
+    <artifactId>kopiyka-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <!-- pom = this module has no code of its own, it only aggregates and configures child modules -->
+    <packaging>pom</packaging>
+    <name>Kopiyka</name>
+
+    <properties>
+        <!-- Boot parent turns this into maven.compiler.release -->
+        <java.version>25</java.version>
+    </properties>
+
+    <!-- Child modules are added here one by one:
+         libs/platform-starter, services/merchant-service, services/payment-service,
+         services/ledger-service, services/api-gateway -->
+    <modules>
+    </modules>
+</project>
