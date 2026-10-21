@@ -1,0 +1,1103 @@
+openapi: 3.1.0
+info:
+  title: Kopiyka Public API
+  version: 1.0.0
+  summary: Public merchant API of the Kopiyka payment platform (pet project).
+  description: |
+    Conventions (details in docs/03-rest-api.md):
+    - JSON bodies with snake_case fields; unknown request fields are rejected with 400.
+    - Amounts are integers in minor units (10050 = 100.50 UAH); currencies are ISO 4217 codes.
+    - Timestamps are RFC 3339 in UTC.
+    - IDs are opaque strings with a type prefix (pay_, re_, evt_, we_, whd_, txn_, mer_).
+    - Errors use RFC 9457 Problem Details (application/problem+json).
+    - Every money-moving POST requires an Idempotency-Key header.
+    - Lists use cursor pagination, newest first.
+servers:
+  - url: http://localhost:8080
+    description: Local environment (api-gateway)
+security:
+  - apiKey: []
+tags:
+  - name: Payments
+  - name: Refunds
+  - name: Balance
+  - name: Events
+  - name: Webhook endpoints
+  - name: Account
+
+paths:
+  /v1/payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Create a payment
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCreateRequest' }
+      responses:
+        '201':
+          description: Payment created.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            ETag: { $ref: '#/components/headers/ETag' }
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+            Request-Id: { $ref: '#/components/headers/RequestId' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    get:
+      tags: [Payments]
+      operationId: listPayments
+      summary: List payments
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/PaymentStatus' }
+        - $ref: '#/components/parameters/CreatedFrom'
+        - $ref: '#/components/parameters/CreatedTo'
+      responses:
+        '200':
+          description: A page of payments, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /v1/payments/{payment_id}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      summary: Retrieve a payment
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: The payment.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/payments/{payment_id}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Payments]
+      operationId: confirmPayment
+      summary: Confirm a payment with a card
+      description: |
+        Runs the fraud check and the bank authorization (plus capture for automatic capture).
+        Returns 200 when the payment reached succeeded, requires_capture or failed, and 202 with
+        status processing when the bank has not answered yet: the result then arrives via webhook
+        or polling. A bank decline is not an API error: it is 200 with status failed.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentConfirmRequest' }
+      responses:
+        '200':
+          description: Payment processed (succeeded, requires_capture or failed).
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '202': { $ref: '#/components/responses/PaymentProcessing' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /v1/payments/{payment_id}/capture:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Payments]
+      operationId: capturePayment
+      summary: Capture an authorized payment (manual capture)
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCaptureRequest' }
+      responses:
+        '200':
+          description: Payment captured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '202': { $ref: '#/components/responses/PaymentProcessing' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /v1/payments/{payment_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Payments]
+      operationId: cancelPayment
+      summary: Cancel a payment or void its authorization
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCancelRequest' }
+      responses:
+        '200':
+          description: Payment canceled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '202': { $ref: '#/components/responses/PaymentProcessing' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /v1/refunds:
+    post:
+      tags: [Refunds]
+      operationId: createRefund
+      summary: Refund a captured payment, fully or partially
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundCreateRequest' }
+      responses:
+        '202':
+          description: Refund accepted; the result arrives as refund.succeeded or refund.failed.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            Idempotent-Replayed: { $ref: '#/components/headers/IdempotentReplayed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    get:
+      tags: [Refunds]
+      operationId: listRefunds
+      summary: List refunds
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: payment_id
+          in: query
+          schema: { type: string, pattern: '^pay_[0-9A-Za-z]+$' }
+      responses:
+        '200':
+          description: A page of refunds, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RefundList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/refunds/{refund_id}:
+    parameters:
+      - $ref: '#/components/parameters/RefundId'
+    get:
+      tags: [Refunds]
+      operationId: getRefund
+      summary: Retrieve a refund
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: The refund.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/balance:
+    get:
+      tags: [Balance]
+      operationId: getBalance
+      summary: Current balance per currency
+      responses:
+        '200':
+          description: The merchant balance.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Balance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/balance_transactions:
+    get:
+      tags: [Balance]
+      operationId: listBalanceTransactions
+      summary: Movements of the merchant balance
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/BalanceTransactionType' }
+        - $ref: '#/components/parameters/CreatedFrom'
+        - $ref: '#/components/parameters/CreatedTo'
+      responses:
+        '200':
+          description: A page of balance transactions, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BalanceTransactionList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/events:
+    get:
+      tags: [Events]
+      operationId: listEvents
+      summary: List events of the last 30 days
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/EventType' }
+      responses:
+        '200':
+          description: A page of events, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/events/{event_id}:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Events]
+      operationId: getEvent
+      summary: Retrieve an event
+      responses:
+        '200':
+          description: The event.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Event' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook_endpoints:
+    post:
+      tags: [Webhook endpoints]
+      operationId: createWebhookEndpoint
+      summary: Register a webhook endpoint
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEndpointCreateRequest' }
+      responses:
+        '201':
+          description: Endpoint created. The signing secret is returned only here.
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    get:
+      tags: [Webhook endpoints]
+      operationId: listWebhookEndpoints
+      summary: List webhook endpoints
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of endpoints.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/webhook_endpoints/{endpoint_id}:
+    parameters:
+      - $ref: '#/components/parameters/EndpointId'
+    get:
+      tags: [Webhook endpoints]
+      operationId: getWebhookEndpoint
+      summary: Retrieve a webhook endpoint
+      parameters:
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: The endpoint.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '304': { $ref: '#/components/responses/NotModified' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Webhook endpoints]
+      operationId: updateWebhookEndpoint
+      summary: Update a webhook endpoint (JSON Merge Patch, optimistic concurrency)
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema: { $ref: '#/components/schemas/WebhookEndpointPatch' }
+      responses:
+        '200':
+          description: Endpoint updated.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '428': { $ref: '#/components/responses/PreconditionRequired' }
+    delete:
+      tags: [Webhook endpoints]
+      operationId: deleteWebhookEndpoint
+      summary: Delete a webhook endpoint
+      responses:
+        '204': { description: Endpoint deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook_endpoints/{endpoint_id}/rotate_secret:
+    parameters:
+      - $ref: '#/components/parameters/EndpointId'
+    post:
+      tags: [Webhook endpoints]
+      operationId: rotateWebhookSecret
+      summary: Issue a new signing secret; the previous one stays valid for 24 hours
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: New secret issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook_endpoints/{endpoint_id}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/EndpointId'
+    get:
+      tags: [Webhook endpoints]
+      operationId: listWebhookDeliveries
+      summary: Delivery log of an endpoint
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/WebhookDeliveryStatus' }
+      responses:
+        '200':
+          description: A page of deliveries, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDeliveryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook_deliveries/{delivery_id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/DeliveryId'
+    post:
+      tags: [Webhook endpoints]
+      operationId: retryWebhookDelivery
+      summary: Schedule a failed delivery for an immediate retry
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Delivery scheduled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/account:
+    get:
+      tags: [Account]
+      operationId: getAccount
+      summary: The merchant account behind the API key
+      responses:
+        '200':
+          description: The account.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+webhooks:
+  event:
+    post:
+      summary: Event delivered to a merchant webhook endpoint
+      description: |
+        At-least-once delivery, no ordering guarantee. Verify the signature over the raw body:
+        v1 = hex(HMAC_SHA256(secret, t + "." + raw_body)); reject if |now - t| > 5 minutes;
+        deduplicate by Kopiyka-Event-Id. Respond with 2xx within 10 seconds, otherwise the delivery
+        is retried for about 3 days with exponential backoff. 410 Gone disables the endpoint.
+      parameters:
+        - name: Kopiyka-Signature
+          in: header
+          required: true
+          description: 't=<unix seconds>,v1=<hex signature>; two v1 values during secret rotation.'
+          schema: { type: string }
+        - name: Kopiyka-Event-Id
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Event' }
+      responses:
+        '2XX': { description: Event accepted. }
+        '410': { description: Endpoint is gone and will be disabled. }
+        default: { description: Delivery failed and will be retried. }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: 'Secret API key: Authorization: Bearer sk_test_...'
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique key (UUID recommended) that makes the request safe to retry. Scoped to the merchant, kept for 24 hours.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag of the version being modified.
+      schema: { type: string, examples: ['"7"'] }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor taken from next_cursor of the previous page.
+      schema: { type: string }
+    CreatedFrom:
+      name: created_from
+      in: query
+      description: Inclusive lower bound of created_at.
+      schema: { type: string, format: date-time }
+    CreatedTo:
+      name: created_to
+      in: query
+      description: Exclusive upper bound of created_at.
+      schema: { type: string, format: date-time }
+    PaymentId:
+      name: payment_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^pay_[0-9A-Za-z]+$' }
+    RefundId:
+      name: refund_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^re_[0-9A-Za-z]+$' }
+    EventId:
+      name: event_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^evt_[0-9A-Za-z]+$' }
+    EndpointId:
+      name: endpoint_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^we_[0-9A-Za-z]+$' }
+    DeliveryId:
+      name: delivery_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^whd_[0-9A-Za-z]+$' }
+
+  headers:
+    Location:
+      description: URL of the created or processing resource.
+      schema: { type: string, format: uri-reference }
+    ETag:
+      description: Strong entity tag, the version of the resource.
+      schema: { type: string, examples: ['"3"'] }
+    IdempotentReplayed:
+      description: Present and true when the response is a replay of a stored response.
+      schema: { type: boolean }
+    RequestId:
+      description: Trace id of the request; look it up in Grafana.
+      schema: { type: string }
+    RetryAfter:
+      description: Seconds to wait before retrying or polling.
+      schema: { type: integer, minimum: 0 }
+
+  responses:
+    PaymentProcessing:
+      description: The bank has not answered yet; poll the payment or wait for a webhook.
+      headers:
+        Location: { $ref: '#/components/headers/Location' }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+        ETag: { $ref: '#/components/headers/ETag' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Payment' }
+    NotModified:
+      description: The resource has not changed since the given ETag.
+    BadRequest:
+      description: Malformed request, unknown field or missing Idempotency-Key.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing, invalid or revoked API key.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: The resource does not exist or belongs to another merchant.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Unexpected resource state, or a request with the same Idempotency-Key is in progress.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionFailed:
+      description: If-Match does not match the current version.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionRequired:
+      description: The If-Match header is required.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnprocessableEntity:
+      description: Validation failed, a business rule was violated, or the Idempotency-Key was reused with other parameters.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ValidationProblem' }
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ServiceUnavailable:
+      description: A dependency (bank, fraud check) is unavailable. Safe to retry with the same Idempotency-Key.
+      headers:
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Currency:
+      type: string
+      enum: [UAH, USD, EUR]
+      description: ISO 4217 alphabetic code.
+    Amount:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 99999999
+      description: Amount in minor units (10050 = 100.50).
+    NonNegativeAmount:
+      type: integer
+      format: int64
+      minimum: 0
+    SignedAmount:
+      type: integer
+      format: int64
+      description: Signed amount in minor units; negative values decrease the balance.
+    Timestamp:
+      type: string
+      format: date-time
+    Metadata:
+      type: object
+      maxProperties: 20
+      propertyNames: { maxLength: 40 }
+      additionalProperties: { type: string, maxLength: 500 }
+    ListEnvelope:
+      type: object
+      required: [object, has_more]
+      properties:
+        object: { type: string, enum: [list] }
+        has_more: { type: boolean }
+        next_cursor: { type: [string, 'null'] }
+
+    PaymentStatus:
+      type: string
+      enum: [requires_confirmation, processing, requires_capture, succeeded, failed, canceled]
+    CaptureMethod:
+      type: string
+      enum: [automatic, manual]
+      default: automatic
+    PaymentFailureCode:
+      type: string
+      enum: [card_declined, insufficient_funds, expired_card, capture_rejected, fraud_blocked, processing_error]
+    CardInput:
+      type: object
+      additionalProperties: false
+      required: [number, exp_month, exp_year, cvc]
+      properties:
+        number: { type: string, pattern: '^[0-9]{12,19}$', writeOnly: true }
+        exp_month: { type: integer, minimum: 1, maximum: 12 }
+        exp_year: { type: integer, minimum: 2026, maximum: 2100 }
+        cvc: { type: string, pattern: '^[0-9]{3,4}$', writeOnly: true }
+    CardDetails:
+      type: object
+      required: [brand, last4, exp_month, exp_year]
+      properties:
+        brand: { type: string, examples: [visa] }
+        last4: { type: string, pattern: '^[0-9]{4}$' }
+        exp_month: { type: integer }
+        exp_year: { type: integer }
+    PaymentCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        capture_method: { $ref: '#/components/schemas/CaptureMethod' }
+        description: { type: string, maxLength: 500 }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+    PaymentConfirmRequest:
+      type: object
+      additionalProperties: false
+      required: [payment_method]
+      properties:
+        payment_method:
+          type: object
+          additionalProperties: false
+          required: [type, card]
+          properties:
+            type: { type: string, enum: [card] }
+            card: { $ref: '#/components/schemas/CardInput' }
+    PaymentCaptureRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        amount_to_capture:
+          $ref: '#/components/schemas/Amount'
+          description: Defaults to amount_capturable; the rest of the authorization is released.
+    PaymentCancelRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        cancellation_reason:
+          type: string
+          enum: [requested_by_customer, duplicate, fraudulent, abandoned]
+    Payment:
+      type: object
+      required: [id, object, amount, currency, status, capture_method, amount_capturable,
+                 amount_captured, amount_refunded, metadata, created_at, updated_at]
+      properties:
+        id: { type: string, examples: [pay_7d1Lr0tRkX2b9QeVwYz4] }
+        object: { type: string, enum: [payment] }
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status: { $ref: '#/components/schemas/PaymentStatus' }
+        capture_method: { $ref: '#/components/schemas/CaptureMethod' }
+        amount_capturable: { $ref: '#/components/schemas/NonNegativeAmount' }
+        amount_captured: { $ref: '#/components/schemas/NonNegativeAmount' }
+        amount_refunded: { $ref: '#/components/schemas/NonNegativeAmount' }
+        fee:
+          description: Platform fee, fixed at capture time.
+          type: [integer, 'null']
+          format: int64
+        net:
+          description: amount_captured minus fee.
+          type: [integer, 'null']
+          format: int64
+        card:
+          anyOf:
+            - $ref: '#/components/schemas/CardDetails'
+            - type: 'null'
+        risk_level:
+          type: [string, 'null']
+          enum: [normal, elevated, null]
+        failure_code:
+          type: [string, 'null']
+          enum: [card_declined, insufficient_funds, expired_card, capture_rejected, fraud_blocked, processing_error, null]
+        failure_message: { type: [string, 'null'] }
+        cancellation_reason:
+          type: [string, 'null']
+          enum: [requested_by_customer, duplicate, fraudulent, abandoned, expired, null]
+        description: { type: [string, 'null'], maxLength: 500 }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        capture_before:
+          description: For manual capture the authorization is voided automatically after this moment.
+          type: [string, 'null']
+          format: date-time
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    PaymentList:
+      allOf:
+        - $ref: '#/components/schemas/ListEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Payment' }
+
+    RefundStatus:
+      type: string
+      enum: [pending, succeeded, failed]
+    RefundCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [payment_id]
+      properties:
+        payment_id: { type: string, pattern: '^pay_[0-9A-Za-z]+$' }
+        amount:
+          $ref: '#/components/schemas/Amount'
+          description: Defaults to the remaining refundable amount.
+        reason:
+          type: string
+          enum: [requested_by_customer, duplicate, fraudulent]
+        metadata: { $ref: '#/components/schemas/Metadata' }
+    Refund:
+      type: object
+      required: [id, object, payment_id, amount, currency, status, metadata, created_at, updated_at]
+      properties:
+        id: { type: string, examples: [re_4Tq9Zk2Lm8Pw] }
+        object: { type: string, enum: [refund] }
+        payment_id: { type: string }
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status: { $ref: '#/components/schemas/RefundStatus' }
+        reason:
+          type: [string, 'null']
+          enum: [requested_by_customer, duplicate, fraudulent, null]
+        failure_code:
+          type: [string, 'null']
+          enum: [insufficient_merchant_balance, bank_declined, null]
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    RefundList:
+      allOf:
+        - $ref: '#/components/schemas/ListEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Refund' }
+
+    BalanceAmount:
+      type: object
+      required: [currency, amount]
+      properties:
+        currency: { $ref: '#/components/schemas/Currency' }
+        amount: { $ref: '#/components/schemas/NonNegativeAmount' }
+    Balance:
+      type: object
+      required: [object, available, pending, reserved]
+      properties:
+        object: { type: string, enum: [balance] }
+        available:
+          type: array
+          items: { $ref: '#/components/schemas/BalanceAmount' }
+        pending:
+          type: array
+          items: { $ref: '#/components/schemas/BalanceAmount' }
+        reserved:
+          type: array
+          items: { $ref: '#/components/schemas/BalanceAmount' }
+    BalanceTransactionType:
+      type: string
+      enum: [payment, refund_hold, refund, refund_release, settlement, payout, adjustment]
+    BalanceTransaction:
+      type: object
+      required: [id, object, type, amount, fee, currency, balance_changes, created_at]
+      properties:
+        id: { type: string, examples: [txn_8Hc2Pq6Vn1Ra] }
+        object: { type: string, enum: [balance_transaction] }
+        type: { $ref: '#/components/schemas/BalanceTransactionType' }
+        amount: { $ref: '#/components/schemas/SignedAmount' }
+        fee: { $ref: '#/components/schemas/NonNegativeAmount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        balance_changes:
+          description: How each balance bucket changed; a capture of 10050 with fee 251 gives pending +9799.
+          type: object
+          required: [available, pending, reserved]
+          properties:
+            available: { $ref: '#/components/schemas/SignedAmount' }
+            pending: { $ref: '#/components/schemas/SignedAmount' }
+            reserved: { $ref: '#/components/schemas/SignedAmount' }
+        source_id:
+          description: ID of the payment, refund or settlement that caused the movement.
+          type: [string, 'null']
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+    BalanceTransactionList:
+      allOf:
+        - $ref: '#/components/schemas/ListEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/BalanceTransaction' }
+
+    EventType:
+      type: string
+      enum: [payment.created, payment.authorized, payment.succeeded, payment.failed, payment.canceled,
+             refund.created, refund.succeeded, refund.failed, balance.available]
+    Event:
+      type: object
+      required: [id, object, type, created_at, data]
+      properties:
+        id: { type: string, examples: [evt_3f9kQ2Wd7Lx] }
+        object: { type: string, enum: [event] }
+        type: { $ref: '#/components/schemas/EventType' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        data:
+          type: object
+          required: [object]
+          properties:
+            object:
+              description: Snapshot of the resource at the moment of the event.
+              oneOf:
+                - $ref: '#/components/schemas/Payment'
+                - $ref: '#/components/schemas/Refund'
+                - $ref: '#/components/schemas/Balance'
+              discriminator:
+                propertyName: object
+                mapping:
+                  payment: '#/components/schemas/Payment'
+                  refund: '#/components/schemas/Refund'
+                  balance: '#/components/schemas/Balance'
+    EventList:
+      allOf:
+        - $ref: '#/components/schemas/ListEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Event' }
+
+    WebhookEndpointCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [url, enabled_events]
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: HTTPS URL. Private, loopback and link-local addresses are rejected.
+        enabled_events:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: Event types to deliver; "*" means all.
+          items: { type: string, examples: [payment.succeeded, '*'] }
+        description: { type: string, maxLength: 500 }
+    WebhookEndpointPatch:
+      description: JSON Merge Patch (RFC 7396); only the given fields change.
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        url: { type: string, format: uri, maxLength: 2048 }
+        enabled_events:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string }
+        description: { type: [string, 'null'], maxLength: 500 }
+        status: { type: string, enum: [enabled, disabled] }
+    WebhookEndpoint:
+      type: object
+      required: [id, object, url, enabled_events, status, created_at, updated_at]
+      properties:
+        id: { type: string, examples: [we_5Rk1Xb7Tq3Mz] }
+        object: { type: string, enum: [webhook_endpoint] }
+        url: { type: string, format: uri }
+        enabled_events:
+          type: array
+          items: { type: string }
+        description: { type: [string, 'null'] }
+        status: { type: string, enum: [enabled, disabled] }
+        disabled_reason:
+          type: [string, 'null']
+          enum: [gone, too_many_failures, by_merchant, null]
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    WebhookEndpointWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpoint'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: Signing secret. Shown only in this response.
+              examples: [whsec_2m9QpX7vK4cL1tRz]
+    WebhookEndpointList:
+      allOf:
+        - $ref: '#/components/schemas/ListEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/WebhookEndpoint' }
+    WebhookDeliveryStatus:
+      type: string
+      enum: [pending, in_flight, succeeded, failed]
+    WebhookDelivery:
+      type: object
+      required: [id, object, event_id, endpoint_id, status, attempt_count, created_at, updated_at]
+      properties:
+        id: { type: string, examples: [whd_9Lp4Cw2Ns8Kd] }
+        object: { type: string, enum: [webhook_delivery] }
+        event_id: { type: string }
+        endpoint_id: { type: string }
+        status: { $ref: '#/components/schemas/WebhookDeliveryStatus' }
+        attempt_count: { type: integer, minimum: 0 }
+        next_attempt_at: { type: [string, 'null'], format: date-time }
+        last_http_status: { type: [integer, 'null'] }
+        last_error: { type: [string, 'null'] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    WebhookDeliveryList:
+      allOf:
+        - $ref: '#/components/schemas/ListEnvelope'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/WebhookDelivery' }
+
+    Account:
+      type: object
+      required: [id, object, name, fee_bps, fee_fixed, settlement_delay_days, created_at]
+      properties:
+        id: { type: string, examples: [mer_2fQe8Kd0aLm3] }
+        object: { type: string, enum: [account] }
+        name: { type: string }
+        fee_bps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          description: Percentage fee in basis points (250 = 2.5%).
+        fee_fixed:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Fixed fee in minor units of the payment currency.
+        settlement_delay_days: { type: integer, minimum: 0 }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with extension members code and request_id.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri, examples: ['https://api.kopiyka.example/errors/payment-unexpected-state'] }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        code: { type: string, description: Stable machine-readable error code., examples: [payment_unexpected_state] }
+        request_id: { type: string }
+    ValidationProblem:
+      allOf:
+        - $ref: '#/components/schemas/Problem'
+        - type: object
+          properties:
+            errors:
+              type: array
+              items:
+                type: object
+                required: [field, code, message]
+                properties:
+                  field: { type: string, examples: [amount] }
+                  code: { type: string, examples: [min] }
+                  message: { type: string }

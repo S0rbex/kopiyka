@@ -1,0 +1,344 @@
+openapi: 3.0.3
+info:
+  title: Bank Simulator API
+  version: 1.0.0
+  description: |
+    Acquirer emulator for the Kopiyka pet project, implemented in Go. The server is generated with
+    oapi-codegen, which is why this contract uses OpenAPI 3.0.
+
+    Every POST requires Idempotency-Key. A retry with the same key returns the original result and never
+    repeats the operation; the same key with a different payload returns 409.
+
+    Behaviour is driven by test card numbers (see docs/03-rest-api.md) and by the chaos configuration:
+    - error_rate: 500 before processing, nothing is recorded (inquiry returns 404, a retry is safe);
+    - timeout_rate: the operation is processed after a delay longer than the client timeout;
+    - ghost_rate: the operation is processed, then the connection is dropped without a response.
+servers:
+  - url: http://localhost:9090
+security:
+  - bankApiKey: []
+
+paths:
+  /bank/v1/authorizations:
+    post:
+      operationId: createAuthorization
+      summary: Authorize (hold) an amount on a card
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AuthorizationRequest' }
+      responses:
+        '201':
+          description: Authorization processed; check status (approved or declined).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Authorization' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /bank/v1/authorizations/{authorization_id}/capture:
+    post:
+      operationId: captureAuthorization
+      summary: Capture an approved authorization, fully or partially
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaptureRequest' }
+      responses:
+        '201':
+          description: Capture processed; check status (captured or declined).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capture' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: Authorization is voided or already captured, or the amount exceeds the authorized amount.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankError' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /bank/v1/authorizations/{authorization_id}/void:
+    post:
+      operationId: voidAuthorization
+      summary: Release an authorization that was not captured
+      parameters:
+        - $ref: '#/components/parameters/AuthorizationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Authorization voided.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Authorization' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: Authorization is already captured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankError' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /bank/v1/refunds:
+    post:
+      operationId: createRefund
+      summary: Return captured money to the customer
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundRequest' }
+      responses:
+        '201':
+          description: Refund processed; check status (approved or declined).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankRefund' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409':
+          description: The total refunded amount would exceed the captured amount.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankError' }
+        '500': { $ref: '#/components/responses/Error' }
+
+  /bank/v1/operations/{idempotency_key}:
+    get:
+      operationId: getOperation
+      summary: Status inquiry by the Idempotency-Key of the original POST
+      parameters:
+        - name: idempotency_key
+          in: path
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 255 }
+      responses:
+        '200':
+          description: The bank has seen this key; status tells the outcome.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404':
+          description: The bank has never seen this key, so the original request did not arrive. It is safe to resend it with the same key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankError' }
+
+  /bank/v1/settlement-reports/{date}:
+    get:
+      operationId: getSettlementReport
+      summary: Daily settlement report
+      parameters:
+        - name: date
+          in: path
+          required: true
+          description: UTC date, e.g. 2026-10-20.
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: |
+            CSV with every approved capture and refund processed on that UTC date. Header and example row:
+
+            operation_id,type,idempotency_key,merchant_reference,amount,currency,processed_at
+            cap_01JB7Q8K2M,capture,pay_7d1Lr0tRkX2b9QeVwYz4:capture,pay_7d1Lr0tRkX2b9QeVwYz4,10050,UAH,2026-10-20T10:15:30Z
+          content:
+            text/csv:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '404':
+          description: The report is not available yet (the date is today or in the future).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankError' }
+
+  /bank/admin/chaos:
+    get:
+      operationId: getChaos
+      summary: Current chaos configuration
+      responses:
+        '200':
+          description: Current configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChaosConfig' }
+    put:
+      operationId: setChaos
+      summary: Replace the chaos configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChaosConfig' }
+      responses:
+        '200':
+          description: Configuration applied.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChaosConfig' }
+        '400': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bankApiKey:
+      type: apiKey
+      in: header
+      name: X-Bank-Api-Key
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Deterministic key chosen by the caller, e.g. pay_7d1Lr0tRkX2b9QeVwYz4:authorize.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    AuthorizationId:
+      name: authorization_id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    Error:
+      description: Error.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/BankError' }
+
+  schemas:
+    Currency:
+      type: string
+      enum: [UAH, USD, EUR]
+    Amount:
+      type: integer
+      format: int64
+      minimum: 1
+      description: Amount in minor units.
+    Card:
+      type: object
+      required: [number, exp_month, exp_year, cvc]
+      properties:
+        number: { type: string, pattern: '^[0-9]{12,19}$' }
+        exp_month: { type: integer, minimum: 1, maximum: 12 }
+        exp_year: { type: integer }
+        cvc: { type: string, pattern: '^[0-9]{3,4}$' }
+    CardSummary:
+      type: object
+      required: [brand, last4]
+      properties:
+        brand: { type: string, example: visa }
+        last4: { type: string, pattern: '^[0-9]{4}$' }
+    AuthorizationRequest:
+      type: object
+      required: [amount, currency, card, merchant_reference]
+      properties:
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        card: { $ref: '#/components/schemas/Card' }
+        merchant_reference: { type: string, description: 'Caller reference, e.g. the payment id.' }
+        descriptor: { type: string, maxLength: 22, description: Text on the customer statement. }
+    Authorization:
+      type: object
+      required: [id, status, amount, currency, card, merchant_reference, created_at]
+      properties:
+        id: { type: string, example: auth_01JB7Q3V9X }
+        status: { type: string, enum: [approved, declined, voided, captured] }
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        decline_code:
+          type: string
+          enum: [card_declined, insufficient_funds, expired_card]
+          description: Present only when status is declined.
+        auth_code: { type: string, description: Present only when status is approved. }
+        card: { $ref: '#/components/schemas/CardSummary' }
+        merchant_reference: { type: string }
+        created_at: { type: string, format: date-time }
+    CaptureRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          $ref: '#/components/schemas/Amount'
+    Capture:
+      type: object
+      required: [id, authorization_id, status, amount, currency, created_at]
+      properties:
+        id: { type: string, example: cap_01JB7Q8K2M }
+        authorization_id: { type: string }
+        status: { type: string, enum: [captured, declined] }
+        decline_code:
+          type: string
+          enum: [capture_rejected]
+          description: Present only when status is declined.
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        created_at: { type: string, format: date-time }
+    RefundRequest:
+      type: object
+      required: [capture_id, amount, merchant_reference]
+      properties:
+        capture_id: { type: string }
+        amount: { $ref: '#/components/schemas/Amount' }
+        merchant_reference: { type: string, description: 'Caller reference, e.g. the refund id.' }
+    BankRefund:
+      type: object
+      required: [id, capture_id, status, amount, currency, merchant_reference, created_at]
+      properties:
+        id: { type: string, example: rfd_01JB7R2D4P }
+        capture_id: { type: string }
+        status: { type: string, enum: [approved, declined] }
+        decline_code:
+          type: string
+          enum: [refund_rejected]
+          description: Present only when status is declined.
+        amount: { $ref: '#/components/schemas/Amount' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        merchant_reference: { type: string }
+        created_at: { type: string, format: date-time }
+    Operation:
+      type: object
+      required: [idempotency_key, type, status]
+      description: |
+        Outcome of the POST made with this key. processing means the bank is still working on it;
+        failed means it was rejected with 500 and recorded (for example test card 4000 0000 0000 0119).
+      properties:
+        idempotency_key: { type: string }
+        type: { type: string, enum: [authorization, capture, void, refund] }
+        status: { type: string, enum: [processing, approved, declined, failed] }
+        authorization: { $ref: '#/components/schemas/Authorization' }
+        capture: { $ref: '#/components/schemas/Capture' }
+        refund: { $ref: '#/components/schemas/BankRefund' }
+        processed_at: { type: string, format: date-time, description: Absent while processing. }
+    ChaosConfig:
+      type: object
+      properties:
+        latency_ms:
+          type: object
+          properties:
+            p50: { type: integer, minimum: 0, default: 50 }
+            p99: { type: integer, minimum: 0, default: 200 }
+        error_rate: { type: number, minimum: 0, maximum: 1, default: 0 }
+        timeout_rate: { type: number, minimum: 0, maximum: 1, default: 0 }
+        ghost_rate: { type: number, minimum: 0, maximum: 1, default: 0 }
+    BankError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [invalid_request, unauthorized, not_found, idempotency_conflict, invalid_state, amount_exceeded, processing_error]
+        message: { type: string }
